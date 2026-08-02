@@ -1,0 +1,29 @@
+# SearXNG config for the evidence layer.
+#
+# The one line that matters: `formats` must include `json`. SearXNG ships with
+# HTML only, so the API returns 403 Forbidden on format=json until it is listed
+# here — which reads like an auth failure but is a config default.
+use_default_settings: true
+
+server:
+  # Only reachable on the compose network; nginx never proxies to it.
+  secret_key: "myth-buster-local-instance"
+  limiter: false
+  image_proxy: false
+
+search:
+  formats:
+    - html
+    - json
+  safe_search: 0
+  autocomplete: ""
+  default_lang: "en"
+
+ui:
+  static_use_hash: true
+
+outgoing:
+  request_timeout: 6.0
+  max_request_timeout: 12.0
+  pool_connections: 20
+  pool_maxsize: 10

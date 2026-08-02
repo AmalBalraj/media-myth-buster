@@ -48,7 +48,6 @@ rsync -az --delete \
   --exclude 'node_modules/' \
   --exclude '.next/' \
   --exclude 'eval/runs/' \
-  --exclude 'infra/searxng/' \
   "$LOCAL_DIR/" "$HOST:$REMOTE_DIR/" \
   || { rc=$?; [ "$rc" = 24 ] || exit $rc; }   # 24 = source file vanished mid-sync
 

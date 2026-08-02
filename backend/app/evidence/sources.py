@@ -14,6 +14,19 @@ from app.config import settings
 
 log = structlog.get_logger(__name__)
 
+# Wikimedia enforces a robot policy: an anonymous or default user-agent gets a
+# blanket 403. Crossref and OpenAlex likewise prefer a contact address and give
+# unidentified callers the slow pool. One header, applied to every source.
+CONTACT = "myth-buster@devmindset.in"
+USER_AGENT = f"MediaMythBuster/0.1 (+https://myth-buster.devmindset.in; {CONTACT})"
+HEADERS = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+
+
+def evidence_client(**kwargs: Any) -> httpx.AsyncClient:
+    """Every outbound evidence request must identify itself."""
+    kwargs.setdefault("follow_redirects", True)
+    return httpx.AsyncClient(headers=HEADERS, **kwargs)
+
 
 @dataclass(slots=True)
 class Doc:
@@ -133,7 +146,7 @@ async def openalex(client: httpx.AsyncClient, query: str) -> list[Doc]:
         data = await _get_json(
             client,
             "https://api.openalex.org/works",
-            {"search": query[:250], "per-page": 5, "mailto": "myth-buster@example.com"},
+            {"search": query[:250], "per-page": 5, "mailto": CONTACT},
         )
     except httpx.HTTPError:
         return []
@@ -147,7 +160,11 @@ async def openalex(client: httpx.AsyncClient, query: str) -> list[Doc]:
                 url=url,
                 title=w.get("title"),
                 snippet=abstract,
-                publisher=(w.get("primary_location") or {}).get("source", {}).get("display_name"),
+                # `.get("source", {})` is not enough: OpenAlex sets the key with a
+            # null value on works with no journal, so the default never applies.
+            publisher=((w.get("primary_location") or {}).get("source") or {}).get(
+                "display_name"
+            ),
                 tier="structured",
                 extra={"year": w.get("publication_year"), "citations": w.get("cited_by_count")},
             )
@@ -155,33 +172,71 @@ async def openalex(client: httpx.AsyncClient, query: str) -> list[Doc]:
     return [d for d in docs if d.url]
 
 
-async def worldbank(client: httpx.AsyncClient, query: str) -> list[Doc]:
-    """Indicator search — useful for statistical claims about countries."""
-    try:
-        data = await _get_json(
-            client,
-            "https://api.worldbank.org/v2/indicator",
-            {"format": "json", "per_page": 5, "source": "2"},
-        )
-    except httpx.HTTPError:
-        return []
-    if not isinstance(data, list) or len(data) < 2:
-        return []
-    terms = {t.lower() for t in query.split() if len(t) > 4}
-    docs = []
-    for ind in data[1]:
-        name = (ind.get("name") or "").lower()
-        if terms & set(name.split()):
-            docs.append(
-                Doc(
-                    url=f"https://data.worldbank.org/indicator/{ind.get('id')}",
-                    title=ind.get("name"),
-                    snippet=(ind.get("sourceNote") or "")[:600],
-                    publisher="World Bank",
-                    tier="structured",
+# The World Development Indicators catalogue (~1500 entries) has no server-side
+# search, so it is fetched once per process and matched locally. Previously this
+# pulled 5 arbitrary indicators per call and matched against them, which could
+# never hit.
+_WDI_CACHE: list[dict] | None = None
+_WDI_LOCK = asyncio.Lock()
+
+STOPWORDS = {
+    "about", "above", "after", "approximately", "around", "because", "before",
+    "being", "between", "could", "during", "every", "first", "their", "there",
+    "these", "those", "under", "which", "while", "would", "percent", "supplies",
+}
+
+
+async def _wdi_catalogue(client: httpx.AsyncClient) -> list[dict]:
+    global _WDI_CACHE
+    async with _WDI_LOCK:
+        if _WDI_CACHE is None:
+            try:
+                data = await _get_json(
+                    client,
+                    "https://api.worldbank.org/v2/indicator",
+                    {"format": "json", "per_page": "2000", "source": "2"},
+                    timeout=30,
                 )
-            )
-    return docs
+                _WDI_CACHE = data[1] if isinstance(data, list) and len(data) > 1 else []
+            except (httpx.HTTPError, ValueError, KeyError):
+                _WDI_CACHE = []
+    return _WDI_CACHE
+
+
+async def worldbank(client: httpx.AsyncClient, query: str) -> list[Doc]:
+    """Match a statistical claim to World Development Indicators."""
+    catalogue = await _wdi_catalogue(client)
+    if not catalogue:
+        return []
+
+    terms = {
+        t.strip(".,%'\"").lower()
+        for t in query.split()
+        if len(t) > 4 and t.strip(".,%'\"").lower() not in STOPWORDS
+    }
+    if not terms:
+        return []
+
+    scored: list[tuple[int, dict]] = []
+    for ind in catalogue:
+        words = {w.strip("(),").lower() for w in (ind.get("name") or "").split()}
+        overlap = len(terms & words)
+        # Two matching terms, so "electricity" alone cannot drag in every
+        # power-related indicator in the catalogue.
+        if overlap >= 2:
+            scored.append((overlap, ind))
+
+    scored.sort(key=lambda pair: -pair[0])
+    return [
+        Doc(
+            url=f"https://data.worldbank.org/indicator/{ind.get('id')}",
+            title=ind.get("name"),
+            snippet=(ind.get("sourceNote") or "")[:600],
+            publisher="World Bank",
+            tier="structured",
+        )
+        for _, ind in scored[:3]
+    ]
 
 
 # ── Tier 3: open web ─────────────────────────────────────────────────────────
@@ -240,7 +295,7 @@ ROUTES: dict[str, list] = {
 
 async def gather(query: str, topic: str = "general") -> list[Doc]:
     """Fan out across tier 1-3 for one claim, tolerating individual source failures."""
-    async with httpx.AsyncClient(follow_redirects=True) as client:
+    async with evidence_client() as client:
         tasks = [google_factcheck(client, query), searxng(client, query)]
         tasks += [fn(client, query) for fn in ROUTES.get(topic, ROUTES["general"])]
 
@@ -253,7 +308,13 @@ async def gather(query: str, topic: str = "general") -> list[Doc]:
             docs.extend(res)
 
         if not any(d.tier == "web" for d in docs):
-            docs.extend(await tavily(client, query))
+            # Outside the gather() above, so it needs its own guard — otherwise a
+            # fallback failure takes down retrieval for the whole claim, and the
+            # claim silently reports as unverifiable.
+            try:
+                docs.extend(await tavily(client, query))
+            except Exception as exc:  # noqa: BLE001
+                log.warning("evidence_source_failed", source="tavily", error=str(exc))
 
     seen: set[str] = set()
     unique = []

@@ -74,5 +74,9 @@ services:
     ports: ["127.0.0.1:8102:8080"]
     environment:
       SEARXNG_BASE_URL: http://localhost:8102/
-    volumes: ["./infra/searxng:/etc/searxng"]
+    # A single read-only file, not the whole directory: mounting the directory
+    # let SearXNG write root-owned files into the repo, which then broke
+    # `rsync --delete` on every deploy. This keeps settings.yml as tracked source
+    # and leaves the container's own /etc/searxng writes inside the container.
+    volumes: ["./infra/searxng/settings.yml:/etc/searxng/settings.yml:ro"]
     restart: unless-stopped

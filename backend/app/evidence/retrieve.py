@@ -18,7 +18,7 @@ from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.evidence import credibility
-from app.evidence.sources import Doc, gather
+from app.evidence.sources import Doc, evidence_client, gather
 from app.models import DocCache
 
 log = structlog.get_logger(__name__)
@@ -53,7 +53,7 @@ def _hash(url: str) -> str:
 
 async def _fetch_text(client: httpx.AsyncClient, url: str) -> str | None:
     try:
-        r = await client.get(url, timeout=15, headers={"User-Agent": "MythBuster/0.1"})
+        r = await client.get(url, timeout=15)
         if r.status_code >= 400 or "html" not in r.headers.get("content-type", ""):
             return None
         return trafilatura.extract(r.text, include_comments=False, include_tables=True)
@@ -75,7 +75,7 @@ async def _hydrate(session: AsyncSession, docs: list[Doc]) -> dict[str, str]:
 
     missing = [d for h, d in hashes.items() if d.url not in out]
     if missing:
-        async with httpx.AsyncClient(follow_redirects=True) as client:
+        async with evidence_client() as client:
             texts = await asyncio.gather(
                 *(_fetch_text(client, d.url) for d in missing), return_exceptions=True
             )

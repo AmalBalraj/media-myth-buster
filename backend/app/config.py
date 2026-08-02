@@ -25,8 +25,12 @@ class Settings(BaseSettings):
     groq_asr_model: str = "whisper-large-v3-turbo"
 
     gemini_api_key: str = ""
-    gemini_video_model: str = "gemini-2.5-flash"
-    gemini_light_model: str = "gemini-2.5-flash-lite"
+    # The 2.5 family still appears in ListModels but is refused for new API keys
+    # ("no longer available to new users"), so the listing is not an availability
+    # signal — these are pinned to models verified against a fresh key. Pinned
+    # rather than `-latest` so a past report's model stays reproducible.
+    gemini_video_model: str = "gemini-3.6-flash"
+    gemini_light_model: str = "gemini-3.5-flash-lite"
 
     forensics_url: str = ""
     forensics_token: str = ""
