@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+from pathlib import Path
 
 from app.config import settings
 from app.ingest.base import CreatorInfo, IngestError, MediaBundle, canonical_permalink
@@ -23,7 +25,19 @@ async def fetch_via_ytdlp(shortcode: str) -> MediaBundle:
 
     cmd = ["yt-dlp", "--dump-single-json", "--no-warnings", "--skip-download"]
     if settings.ytdlp_cookies_file:
-        cmd += ["--cookies", settings.ytdlp_cookies_file]
+        # Checked here rather than left to yt-dlp: a path that is missing inside
+        # the container (a host path in a container-bound config is the usual
+        # slip) otherwise surfaces as a generic extraction failure.
+        cookies = Path(settings.ytdlp_cookies_file)
+        if not cookies.is_file():
+            raise IngestError(
+                f"YTDLP_COOKIES_FILE points at {cookies}, which does not exist "
+                "inside the container. Ship it with ./deploy/push-cookies.sh, "
+                "which places it in the mounted data/ directory."
+            )
+        if not os.access(cookies, os.R_OK):
+            raise IngestError(f"Cookie file {cookies} exists but is not readable")
+        cmd += ["--cookies", str(cookies)]
     cmd.append(canonical_permalink(shortcode))
 
     proc = await asyncio.create_subprocess_exec(

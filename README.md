@@ -61,18 +61,51 @@ Two independent paths. **Pick one — you do not need both.**
 ### Path A — yt-dlp (personal use; nothing to set up)
 
 ```bash
-ENABLE_YTDLP_FALLBACK=true          # already the default in .env.example
-YTDLP_COOKIES_FILE=/path/to/cookies.txt
+ENABLE_YTDLP_FALLBACK=true                            # already the default
+YTDLP_COOKIES_FILE=/data/instagram-cookies.txt        # container path, see below
 ```
 
-No Meta account, no app, no review. Most reels need a session, so export cookies in
-Netscape format from a **burner** Instagram account (never your own) — a browser
-extension like "Get cookies.txt" does this, or `yt-dlp --cookies-from-browser chrome`.
-Without cookies Instagram returns an empty media response for most posts.
+No Meta account, no app, no review. Most reels need a session, so you need a cookie
+export from a **burner** Instagram account (never your own).
+
+**Generate the cookies on your own machine, never on the server.** Instagram scores
+datacenter IPs as high-risk; logging in from the Oracle box is a fast route to a
+checkpointed or banned account. The session then travels to the server as a file.
+
+1. Create the burner account on your phone or laptop. Let it sit a day and follow a
+   few accounts — a brand-new account that immediately starts fetching looks exactly
+   like what it is.
+2. Log into it in a browser, ideally a separate profile so it doesn't collide with
+   your own session. **Do not log out afterwards** — that invalidates the `sessionid`
+   you are about to export.
+3. Export cookies for `instagram.com` in **Netscape format** using a "cookies.txt"
+   browser extension. A JSON export will not work. Locally you can skip the extension
+   with `yt-dlp --cookies-from-browser chrome --cookies cookies.txt`.
+4. Ship it:
+
+```bash
+./deploy/push-cookies.sh ~/Downloads/instagram-cookies.txt
+```
+
+That validates the file (Netscape format, has instagram.com cookies, has a live
+`sessionid`, warns if it expires within a week), copies it to the server's `data/`
+directory as mode 600, points `YTDLP_COOKIES_FILE` at the **container** path
+`/data/instagram-cookies.txt`, and restarts the workers. `data/` is excluded from
+rsync, so deploys never clobber it.
+
+> The path must be a container path. `data/` on the host is mounted at `/data`, so a
+> host path like `/home/amal/...` in `.env` will not resolve inside the worker. The
+> ingest adapter checks this at call time and says so rather than surfacing a generic
+> extraction failure.
+
+Sessions last weeks, not months, and can be cut short by a checkpoint. When reels
+start failing with "empty media response", open the burner in a browser, clear any
+prompt, and re-run `push-cookies.sh`.
 
 This violates Instagram's ToS and the extractor breaks periodically, so it is fine for
 a private tool and unsuitable for anything public-facing. When Graph credentials are
 absent the ladder skips those rungs entirely rather than failing through them.
+
 
 ### Path B — Meta Graph API (only for the public @mention bot)
 
