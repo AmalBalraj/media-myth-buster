@@ -46,7 +46,9 @@ export function Progress({
   return (
     <div className="card">
       <h2>Analysing</h2>
-      <p className="sub">This usually takes 30–90 seconds.</p>
+      {/* Reasoning-model calls dominate: claim extraction and each adjudication
+          run ~50s, three at a time. */}
+      <p className="sub">This usually takes two to four minutes.</p>
 
       <ul className="stages">
         {STAGES.map(([key, label], i) => {

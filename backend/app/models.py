@@ -81,7 +81,13 @@ class Media(Base, TimestampMixin):
     phashes: Mapped[list[str] | None] = mapped_column(ARRAY(String(64)))
 
     creator_id: Mapped[str | None] = mapped_column(ForeignKey("creators.id"))
-    creator: Mapped[Creator | None] = relationship(back_populates="media")
+    # raise_on_sql, not the default lazy load: under asyncio an implicit lazy
+    # load raises MissingGreenlet at runtime and only in production. This turns
+    # the same mistake into a loud error anywhere, including sync tests.
+    # Callers must eager-load it (selectinload) or use creator_id.
+    creator: Mapped[Creator | None] = relationship(
+        back_populates="media", lazy="raise_on_sql"
+    )
 
 
 class Report(Base, TimestampMixin):
@@ -114,7 +120,7 @@ class Report(Base, TimestampMixin):
     video_analysis: Mapped[dict[str, Any] | None] = mapped_column(JSONB)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    media: Mapped[Media] = relationship()
+    media: Mapped[Media] = relationship(lazy="raise_on_sql")
     claims: Mapped[list[Claim]] = relationship(
         back_populates="report", cascade="all, delete-orphan"
     )

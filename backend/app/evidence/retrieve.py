@@ -112,6 +112,13 @@ async def evidence_for_claim(
         body = full_text.get(doc.url) or doc.snippet or ""
         if not body.strip():
             continue
+        # Social posts and syndication aggregators are dropped before the model
+        # sees them. Leaving them in and hoping the prompt deprioritises them
+        # does not work: a live run cited Facebook and Instagram posts as
+        # evidence for claims taken from an Instagram reel.
+        if not credibility.is_citable(doc.url):
+            log.debug("evidence_not_citable", url=doc.url)
+            continue
         cred, lean = credibility.lookup(doc.url)
         # Professional fact checks outrank their raw domain rating.
         if doc.tier == "factcheck":

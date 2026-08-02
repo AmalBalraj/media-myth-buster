@@ -52,7 +52,36 @@ _SEED: dict[str, tuple[float, float | None]] = {
     "medium.com": (0.35, None), "substack.com": (0.35, None),
     "youtube.com": (0.25, None), "reddit.com": (0.25, None),
     "x.com": (0.20, None), "twitter.com": (0.20, None), "facebook.com": (0.20, None),
+    "instagram.com": (0.20, None), "tiktok.com": (0.20, None),
+    "quora.com": (0.20, None), "pinterest.com": (0.15, None),
+    # Syndication aggregators: they republish other outlets' work, so the URL
+    # says nothing about who actually reported it.
+    "msn.com": (0.40, None), "news.yahoo.com": (0.45, None),
+    "news.google.com": (0.40, None), "flipboard.com": (0.35, None),
 }
+
+# Never usable as a citation, whatever the retriever turns up.
+#
+# A fact-check that rests on an Instagram post is circular: the claim under
+# review came from exactly that kind of source. These domains can still inform
+# retrieval, but if a claim is supported by nothing else it is unverifiable —
+# which is the honest answer.
+NOT_CITABLE = frozenset({
+    "facebook.com", "instagram.com", "x.com", "twitter.com", "tiktok.com",
+    "reddit.com", "quora.com", "pinterest.com", "threads.net", "t.me",
+    "youtube.com", "youtu.be",
+})
+
+# Below this, a source may appear in the report as context but cannot carry a
+# verdict on its own.
+CITABLE_MIN_CREDIBILITY = 0.45
+
+
+def is_citable(url: str) -> bool:
+    host = _domain(url)
+    if any(host == d or host.endswith("." + d) for d in NOT_CITABLE):
+        return False
+    return lookup(url)[0] >= CITABLE_MIN_CREDIBILITY
 
 _ratings: dict[str, tuple[float, float | None]] = dict(_SEED)
 

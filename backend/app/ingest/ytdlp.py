@@ -67,8 +67,17 @@ async def fetch_via_ytdlp(shortcode: str) -> MediaBundle:
         view_count=info.get("view_count"),
         thumbnail_url=info.get("thumbnail"),
         creator=CreatorInfo(
-            handle=info.get("uploader_id") or info.get("uploader") or "unknown",
-            display_name=info.get("uploader"),
+            # `uploader_id` is Instagram's numeric account id, which is useless
+            # as a display handle and fragments the creator track record across
+            # ids. `channel`/`uploader` carry the @username.
+            handle=(
+                info.get("channel")
+                or info.get("uploader")
+                or info.get("uploader_id")
+                or "unknown"
+            ),
+            display_name=info.get("uploader") or info.get("channel"),
+            ig_user_id=info.get("uploader_id"),
         ),
         raw={"extractor": "yt-dlp"},
     )

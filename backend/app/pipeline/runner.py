@@ -80,7 +80,9 @@ async def _upsert_creator(session: AsyncSession, bundle: MediaBundle) -> Creator
     return creator
 
 
-async def _stage_ingest(session: AsyncSession, report: Report, url: str) -> tuple[Media, Path]:
+async def _stage_ingest(
+    session: AsyncSession, report: Report, url: str
+) -> tuple[Media, Path, Creator | None]:
     bundle = await resolve(url)
     if not bundle.has_video:
         raise PipelineError("Resolved the post but it exposes no downloadable video")
@@ -113,14 +115,19 @@ async def _stage_ingest(session: AsyncSession, report: Report, url: str) -> tupl
 
     await session.flush()
     report.media_id = media.id
-    return media, path
+    # The Creator is returned rather than reached through media.creator: that
+    # attribute is never eager-loaded here, and touching it would issue lazy SQL.
+    return media, path, creator
 
 
 async def _stage_transcribe(report_id: str, path: Path) -> dict[str, Any]:
     await _emit(report_id, "transcribe", "start")
     try:
         result = await groq_asr.transcribe(path)
-    except ProviderError as exc:
+    # Broad by design: this stage is degradable, and the pipeline checks below
+    # that at least one of transcript/OCR produced content. A provider quirk
+    # must not take down an analysis the other stage could still carry.
+    except Exception as exc:  # noqa: BLE001
         log.warning("asr_failed", error=str(exc))
         await _emit(report_id, "transcribe", "error", message=str(exc))
         return {"text": "", "segments": [], "error": str(exc)}
@@ -135,8 +142,8 @@ async def _stage_video(report_id: str, path: Path) -> dict[str, Any]:
     await _emit(report_id, "video", "start")
     try:
         result = await gemini_video.analyse_video(path)
-    except ProviderError as exc:
-        log.warning("video_analysis_failed", error=str(exc))
+    except Exception as exc:  # noqa: BLE001 - degradable stage, see _stage_transcribe
+        log.warning("video_analysis_failed", error=str(exc), exc_info=True)
         await _emit(report_id, "video", "error", message=str(exc))
         return {"error": str(exc), "on_screen_text": []}
     await _emit(
@@ -147,7 +154,12 @@ async def _stage_video(report_id: str, path: Path) -> dict[str, Any]:
 
 async def _stage_forensics(report_id: str, media_url: str, shortcode: str) -> list:
     await _emit(report_id, "forensics", "start")
-    signals = await forensics_api.analyse(media_url, shortcode)
+    try:
+        signals = await forensics_api.analyse(media_url, shortcode)
+    except Exception as exc:  # noqa: BLE001 - degradable stage, see _stage_transcribe
+        log.warning("forensics_failed", error=str(exc))
+        await _emit(report_id, "forensics", "error", message=str(exc))
+        return []
     await _emit(report_id, "forensics", "done", signals=len(signals))
     return signals
 
@@ -165,7 +177,7 @@ async def _stage_claims(
         ]
     )
     payload = await ds.json(
-        system=prompts.CLAIM_EXTRACTION_SYSTEM, user=user, stage="claims", max_tokens=6000
+        system=prompts.CLAIM_EXTRACTION_SYSTEM, user=user, stage="claims", max_tokens=16000
     )
     claims = payload.get("claims", []) if isinstance(payload, dict) else []
     await _emit(report_id, "claims", "done", count=len(claims))
@@ -200,7 +212,7 @@ async def _adjudicate_one(
         f"EVIDENCE (cite only these IDs):\n{render_pack(passages)}"
     )
     result = await ds.json(
-        system=prompts.ADJUDICATION_SYSTEM, user=user, stage="adjudicate", max_tokens=1200
+        system=prompts.ADJUDICATION_SYSTEM, user=user, stage="adjudicate", max_tokens=6000
     )
 
     # Enforce the citation rule mechanically. A hallucinated ID is dropped, and a
@@ -267,7 +279,8 @@ async def _stage_lean(
     )
     try:
         return await ds.json(
-            system=prompts.LEAN_SYSTEM, user=user, stage="lean", max_tokens=1200
+            system=prompts.LEAN_SYSTEM, user=user, stage="lean", max_tokens=3000,
+            reasoning=False
         )
     except (ProviderError, ValueError) as exc:
         log.warning("lean_failed", error=str(exc))
@@ -291,7 +304,8 @@ async def _stage_summary(
     )
     try:
         return await ds.json(
-            system=prompts.SUMMARY_SYSTEM, user=user, stage="summary", max_tokens=800
+            system=prompts.SUMMARY_SYSTEM, user=user, stage="summary", max_tokens=2500,
+            reasoning=False
         )
     except (ProviderError, ValueError):
         return {"summary": "Analysis completed.", "headline": "Analysis complete"}
@@ -357,17 +371,20 @@ async def _persist(
 async def run_pipeline(session: AsyncSession, report: Report, url: str) -> None:
     started = time.perf_counter()
     ds = DeepSeek()
+    # Bound before the try so the finally block is safe when ingest itself fails.
+    media_path: str | None = None
     report.status = "running"
     await session.flush()
 
     try:
         await _emit(report.id, "ingest", "start")
-        media, path = await _stage_ingest(session, report, url)
+        media, path, creator = await _stage_ingest(session, report, url)
+        media_path = str(path)
         await session.commit()
         await _emit(
             report.id, "ingest", "done",
             shortcode=media.shortcode, path=media.ingest_path,
-            creator=media.creator.handle if media.creator else None,
+            creator=creator.handle if creator else None,
         )
 
         # Transcript, video understanding, and forensics are independent — the
@@ -457,9 +474,9 @@ async def run_pipeline(session: AsyncSession, report: Report, url: str) -> None:
                 "note": track.note,
                 "history": track.history[:20],
             }
-            if media.creator:
-                media.creator.reels_analysed = track.reels_analysed + 1
-                media.creator.accuracy_score = track.score
+            if creator is not None:
+                creator.reels_analysed = track.reels_analysed + 1
+                creator.accuracy_score = track.score
 
         report.status = "done"
         report.stage = "done"
@@ -490,6 +507,9 @@ async def run_pipeline(session: AsyncSession, report: Report, url: str) -> None:
         log.exception("pipeline_crashed", report_id=report.id)
 
     finally:
-        if settings.media_retention_days == 0:
-            Path(report.media.storage_key).unlink(missing_ok=True) if report.media else None
+        # media_path, not report.media.storage_key: the relationship is not
+        # loaded here and reaching for it would issue SQL after the session may
+        # already be rolled back.
+        if settings.media_retention_days == 0 and media_path:
+            Path(media_path).unlink(missing_ok=True)
         log.info("pipeline_usage", report_id=report.id, calls=json.dumps(ds.usage)[:2000])

@@ -162,9 +162,37 @@ async def analyse_video(path: Path, model: str | None = None) -> dict[str, Any]:
     except (KeyError, IndexError) as exc:
         raise ProviderError(f"Unexpected Gemini response shape: {json.dumps(payload)[:300]}") from exc
 
-    result = _extract_json(text)
-    result["_model"] = model
-    return result
+    return _coerce_analysis(_extract_json(text), model)
+
+
+def _coerce_analysis(result: Any, model: str) -> dict[str, Any]:
+    """Normalise the response shape.
+
+    Despite responseMimeType=application/json and a schema in the prompt, Gemini
+    sometimes returns a top-level array — either the object wrapped in a list, or
+    the on_screen_text entries alone. Assuming a dict here crashed the whole
+    pipeline on a stage that is meant to be optional.
+    """
+    if isinstance(result, dict):
+        result["_model"] = model
+        return result
+
+    if isinstance(result, list):
+        # A single wrapped object is the common case.
+        if len(result) == 1 and isinstance(result[0], dict) and "on_screen_text" in result[0]:
+            result[0]["_model"] = model
+            return result[0]
+        # Otherwise treat a list of spans as the OCR payload; it is the field the
+        # claim extractor actually depends on.
+        spans = [x for x in result if isinstance(x, dict) and "text" in x]
+        if spans:
+            log.info("gemini_returned_bare_span_list", count=len(spans))
+            return {"on_screen_text": spans, "_model": model, "_coerced": True}
+
+    raise ProviderError(
+        f"Gemini returned an unusable shape ({type(result).__name__}); "
+        "expected an object with on_screen_text"
+    )
 
 
 def ocr_timeline(analysis: dict[str, Any]) -> str:

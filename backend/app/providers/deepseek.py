@@ -75,30 +75,49 @@ class DeepSeek:
         user: str,
         stage: str,
         temperature: float = 0.2,
-        max_tokens: int = 8000,
+        max_tokens: int = 12000,
         retries: int = 2,
+        reasoning: bool = True,
     ) -> Any:
-        """One JSON call. Retries on malformed output with a corrective nudge."""
+        """One JSON call.
+
+        V4 is a reasoning model: it emits `reasoning_content` alongside `content`,
+        and `max_tokens` bounds the two *together*. A long transcript can spend the
+        entire budget thinking and return empty content — which is what killed the
+        first real reel. Budgets here are therefore sized for reasoning + answer,
+        and exhaustion self-heals by retrying with reasoning off rather than
+        burning another full budget on the same wall.
+
+        `reasoning=False` is for stages where it buys nothing (formatting, scoring
+        against a fixed rubric) and costs ~50s of latency per call.
+        """
         messages = [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ]
         prompt_hash = hashlib.sha256((system + user).encode()).hexdigest()[:32]
+        use_reasoning = reasoning
 
         for attempt in range(retries + 1):
+            payload: dict[str, Any] = {
+                "model": self.model,
+                "messages": messages,
+                "temperature": temperature,
+                "max_tokens": max_tokens,
+                "response_format": {"type": "json_object"},
+            }
+            if not use_reasoning:
+                payload["reasoning_effort"] = "none"
+
             started = time.perf_counter()
-            data = await self._post(
-                {
-                    "model": self.model,
-                    "messages": messages,
-                    "temperature": temperature,
-                    "max_tokens": max_tokens,
-                    "response_format": {"type": "json_object"},
-                }
-            )
+            data = await self._post(payload)
             latency_ms = int((time.perf_counter() - started) * 1000)
+
             usage = data.get("usage", {}) or {}
-            content = data["choices"][0]["message"]["content"]
+            choice = data["choices"][0]
+            message = choice.get("message", {})
+            content = message.get("content") or ""
+            reasoning_len = len(message.get("reasoning_content") or "")
 
             self.usage.append(
                 {
@@ -113,12 +132,30 @@ class DeepSeek:
                 }
             )
 
+            starved = not content.strip() and (
+                choice.get("finish_reason") == "length" or reasoning_len > 0
+            )
+            if starved and use_reasoning:
+                # Retrying the same request would just hit the same wall, so drop
+                # reasoning and keep the budget for the answer.
+                log.warning(
+                    "deepseek_reasoning_starved",
+                    stage=stage,
+                    reasoning_chars=reasoning_len,
+                    tokens_out=usage.get("completion_tokens"),
+                )
+                use_reasoning = False
+                continue
+
             try:
                 return _extract_json(content)
             except (ProviderError, json.JSONDecodeError):
                 if attempt == retries:
                     raise
-                log.warning("deepseek_bad_json", stage=stage, attempt=attempt)
+                log.warning(
+                    "deepseek_bad_json", stage=stage, attempt=attempt,
+                    content_preview=content[:120],
+                )
                 messages += [
                     {"role": "assistant", "content": content[:2000]},
                     {
@@ -126,6 +163,8 @@ class DeepSeek:
                         "content": "That was not valid JSON. Reply with the JSON object only.",
                     },
                 ]
+
+        raise ProviderError(f"{stage}: exhausted retries without valid JSON")
 
     def cost_usd(self) -> float:
         """Rough running cost, for the report footer. Cache-hit input is ~free."""
