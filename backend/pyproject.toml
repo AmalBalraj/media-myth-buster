@@ -1,0 +1,43 @@
+[project]
+name = "myth-buster-backend"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "httpx>=0.27",
+    "sqlalchemy[asyncio]>=2.0.36",
+    "asyncpg>=0.30",
+    "alembic>=1.14",
+    "pgvector>=0.3.6",
+    "arq>=0.26",
+    "redis>=5.2",
+    "sse-starlette>=2.1",
+    "trafilatura>=1.12",
+    "python-multipart>=0.0.12",
+    "structlog>=24.4",
+    # Default ingest path for personal use; gated at runtime by ENABLE_YTDLP_FALLBACK.
+    "yt-dlp>=2026.7.4",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3", "pytest-asyncio>=0.24", "ruff>=0.8", "respx>=0.21"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# FastAPI's Depends()-in-default is the framework's intended idiom.
+"app/api/*.py" = ["B008"]
+# Prompt text is line-sensitive; reflowing it changes what the model sees.
+"app/pipeline/prompts.py" = ["E501"]
+"app/providers/gemini_video.py" = ["E501"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"

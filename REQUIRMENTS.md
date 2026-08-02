@@ -1,0 +1,4 @@
+- From a social media video link.. preferrably instagram reels.. it should figure out the validity of the reel. Like how accurate the content is. Maybe also give scores like how politically left or right the content is. Also give the credibility of the content maker and cite the sources.
+- This for now could be a website. Lateron I want to figure out if its possible to integrate with instagram somehow.
+- Getting the content should have a transcript. Also get the video analysis(not sure how this can be achieved) - like if the video is fake, edited, deepfake etc. The analysis of the transcript and the video combined should give the output. Along with the user details if possible. Along with an overall score on the validity of the content. 
+- The output should be very detailed and should include charts and graphs too. To show the validity of the content. Along with other details.

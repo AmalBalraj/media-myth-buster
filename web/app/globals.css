@@ -1,0 +1,336 @@
+/* Design tokens.
+ *
+ * Verdicts are a DIVERGING scale (supported <-> refuted), so: two hue poles plus a
+ * neutral gray midpoint. Green<->red was tested and rejected — it fails colour-vision
+ * separation badly (deutan dE 5.2 between the poles). Blue<->red measures dE 18.3
+ * protan / 29.9 normal in light and 19.2 / 29.0 in dark: all checks pass both modes.
+ *
+ * Within an arm (true vs mostly_true) the distinction is carried by the always-present
+ * text label and fill opacity, never by hue alone — two steps per arm cannot clear the
+ * dark-mode lightness band.
+ */
+
+:root {
+  color-scheme: light;
+
+  --surface-1: #fcfcfb;
+  --page: #f9f9f7;
+  --text-primary: #0b0b0b;
+  --text-secondary: #52514e;
+  --text-muted: #898781;
+  --gridline: #e1e0d9;
+  --baseline: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.1);
+
+  /* diverging poles */
+  --pole-support: #184f95;
+  --pole-refute: #c0392b;
+  --neutral-fill: #f0efec;
+  --neutral-mark: #898781;
+
+  /* sequential ramp (magnitude: forensic signal strength) */
+  --seq-1: #86b6ef;
+  --seq-2: #3987e5;
+  --seq-3: #256abf;
+  --seq-4: #184f95;
+
+  --radius: 10px;
+  --font: system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:where(:not([data-theme="light"])) {
+    color-scheme: dark;
+    --surface-1: #1a1a19;
+    --page: #0d0d0d;
+    --text-primary: #ffffff;
+    --text-secondary: #c3c2b7;
+    --text-muted: #898781;
+    --gridline: #2c2c2a;
+    --baseline: #383835;
+    --border: rgba(255, 255, 255, 0.1);
+    --pole-support: #3987e5;
+    --pole-refute: #e66767;
+    --neutral-fill: #383835;
+    --neutral-mark: #898781;
+    --seq-1: #184f95;
+    --seq-2: #256abf;
+    --seq-3: #3987e5;
+    --seq-4: #86b6ef;
+  }
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --surface-1: #1a1a19;
+  --page: #0d0d0d;
+  --text-primary: #ffffff;
+  --text-secondary: #c3c2b7;
+  --gridline: #2c2c2a;
+  --baseline: #383835;
+  --border: rgba(255, 255, 255, 0.1);
+  --pole-support: #3987e5;
+  --pole-refute: #e66767;
+  --neutral-fill: #383835;
+  --seq-1: #184f95;
+  --seq-2: #256abf;
+  --seq-3: #3987e5;
+  --seq-4: #86b6ef;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--page);
+  color: var(--text-primary);
+  font-family: var(--font);
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: inherit;
+}
+
+.wrap {
+  max-width: 940px;
+  margin: 0 auto;
+  padding: 32px 20px 96px;
+}
+
+.card {
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 20px;
+}
+
+.card > h2 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.card > h2 + p.sub {
+  margin: 0 0 18px;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.muted {
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.sub {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+/* Wide content scrolls inside its own box; the page never scrolls sideways. */
+.scroll-x {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+.grid-2 {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 20px;
+  align-items: start;
+}
+
+/* ── Forms ─────────────────────────────────────────────────────────────── */
+.field {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+input[type="url"],
+input[type="text"] {
+  flex: 1 1 320px;
+  padding: 11px 13px;
+  font: inherit;
+  font-size: 14px;
+  color: var(--text-primary);
+  background: var(--page);
+  border: 1px solid var(--baseline);
+  border-radius: 8px;
+}
+
+input:focus-visible,
+button:focus-visible,
+.claim-row:focus-visible {
+  outline: 2px solid var(--pole-support);
+  outline-offset: 2px;
+}
+
+button {
+  padding: 11px 18px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 550;
+  color: var(--surface-1);
+  background: var(--text-primary);
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+/* ── Verdict chips: colour never travels without its label ─────────────── */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px 2px 7px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 550;
+  white-space: nowrap;
+  color: var(--text-primary);
+  background: var(--neutral-fill);
+  border: 1px solid var(--border);
+}
+
+.chip .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex: none;
+}
+
+/* ── Progress ──────────────────────────────────────────────────────────── */
+.stages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.stages li {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 6px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.stages li[data-state="active"] {
+  color: var(--text-primary);
+  border-color: var(--pole-support);
+}
+
+.stages li[data-state="done"] {
+  color: var(--text-secondary);
+}
+
+.stages li[data-state="error"] {
+  color: var(--pole-refute);
+  border-color: var(--pole-refute);
+}
+
+/* ── Claims ────────────────────────────────────────────────────────────── */
+.claim-row {
+  border-top: 1px solid var(--gridline);
+  padding: 16px 0;
+}
+
+.claim-row:first-child {
+  border-top: 0;
+}
+
+.claim-head {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+}
+
+.claim-text {
+  font-size: 15px;
+  margin: 0 0 6px;
+}
+
+.evidence {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 7px;
+}
+
+.evidence li {
+  font-size: 13px;
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+}
+
+.evidence a {
+  color: var(--text-primary);
+}
+
+.cred {
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--gridline);
+}
+
+th {
+  color: var(--text-secondary);
+  font-weight: 550;
+}
+
+td.num {
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+details summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+
+.tooltip {
+  position: absolute;
+  pointer-events: none;
+  background: var(--surface-1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 12px;
+  max-width: 280px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.14);
+  z-index: 20;
+}
