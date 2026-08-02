@@ -146,7 +146,8 @@ ffmpeg step anywhere in the happy path.
 1. `mentioned_media` via the mentions webhook — works on media you don't own
 2. `business_discovery` — any Professional account's public media, by username
 3. oEmbed — thumbnail and author handle, app-token only
-4. yt-dlp — off by default; the only route to personal-account reels, and against ToS
+4. yt-dlp — the only route to personal-account reels, and against ToS. Default for
+   personal use (§2 Path A); the rungs above are skipped entirely when unconfigured
 
 ---
 
@@ -166,7 +167,49 @@ web/
 eval/           cases.jsonl + run_eval.py  ← build this before tuning prompts
 ```
 
-## 5. Tests
+## 5. Deployment
+
+Live at **https://myth-buster.devmindset.in** on `oracle-dev`, behind the same
+nginx + certbot setup as the other sites on that box.
+
+```bash
+./deploy/deploy.sh            # sync, rebuild, restart, health-check
+./deploy/deploy.sh --api      # backend only (skips the slow web image build)
+./deploy/deploy.sh --web      # frontend only
+./deploy/deploy.sh --logs     # tail logs afterwards
+```
+
+`deploy.sh` runs the test suite before it ships anything, rsyncs the tree, rebuilds,
+and polls `/api/health` until the site answers. **The server's `.env` is excluded from
+the sync** — it holds the API keys and is the one file a deploy must never clobber.
+
+First-time setup on a new host (idempotent):
+
+```bash
+./deploy/bootstrap.sh         # remote dirs, .env from example, nginx site
+ssh oracle-dev 'nano /home/amal/myth-buster/.env'    # add API keys
+./deploy/deploy.sh
+./deploy/tls.sh               # certbot --nginx, after the site answers on :80
+```
+
+Override the target with `MYTH_HOST`, `MYTH_REMOTE_DIR`, `MYTH_DOMAIN`.
+
+**Topology.** Everything binds to `127.0.0.1`; nginx is the only public entrance.
+`/api/*` proxies to FastAPI on `:8100`, everything else to Next.js on `:3005`. The SSE
+endpoint gets its own regex location with `proxy_buffering off` and a 900s read timeout
+— a prefix location there would both break streaming and make nginx 301 the
+`/api/reports` collection route.
+
+The deploy account is not in the `docker` group but has passwordless sudo, so the
+scripts detect which is available rather than assuming.
+
+```bash
+ssh oracle-dev 'cd myth-buster && sudo docker compose ps'
+ssh oracle-dev 'cd myth-buster && sudo docker compose logs -f worker'
+ssh oracle-dev 'cd myth-buster && sudo docker compose exec -T api python -m scripts.seed_demo'
+```
+
+## 6. Tests
 
 ```bash
 cd backend && .venv/bin/python -m pytest tests -q     # 48 tests
@@ -178,7 +221,7 @@ than scored as half-true, low-confidence forensics cannot move the score, halluc
 citations are dropped, the SSRF guard rejects cloud-metadata and suffix-confusion
 hosts, and webhook signatures are verified properly.
 
-## 6. Known limitations
+## 7. Known limitations
 
 Stated in the product too, at `/methodology`:
 
@@ -190,7 +233,7 @@ Stated in the product too, at `/methodology`:
 - Creator credibility is hidden below 5 analysed reels.
 - Personal Instagram accounts are unreachable via any sanctioned API.
 
-## 7. Before making this public
+## 8. Before making this public
 
 - MBFC/AllSides bias data needs a licence for public use — the shipped table is a small
   hand-curated placeholder ([credibility.py](backend/app/evidence/credibility.py)).
