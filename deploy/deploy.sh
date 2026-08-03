@@ -74,21 +74,48 @@ fi
 # Migrate before anything serves. A model change that never reached the database
 # used to surface as a runtime insert failure on the first analysis; now it is a
 # failed deploy instead.
+#
+# The </dev/null on each \`compose run\` is load-bearing. This script arrives on
+# the remote's stdin (bash -s), and \`compose run\` attaches stdin to the
+# container, swallowing every remaining line of the deploy. -T alone does not
+# prevent it — it only disables the TTY. The symptom was brutal: the migration
+# ran, then the container restart and every check after it silently never
+# happened, and the deploy reported success while still serving the old image.
 echo "migrating database…"
 \$DC up -d postgres
-\$DC run --rm --no-deps api alembic upgrade head
+\$DC run --rm --no-deps -T api alembic upgrade head </dev/null
 
 # Refuse to ship models that have drifted from the migrations.
-if ! \$DC run --rm --no-deps api alembic check; then
+if ! \$DC run --rm --no-deps -T api alembic check </dev/null; then
   echo "FATAL: models have changes with no migration. Run:" >&2
   echo "  cd backend && alembic revision --autogenerate -m 'describe change'" >&2
   exit 1
 fi
 
-\$DC up -d --remove-orphans \$services
+# --force-recreate is not optional: after a rebuild, plain \`up -d\` left the
+# long-running containers on the previous image, so a deploy reported success
+# while still serving the old code. A deploy is an explicit action; always
+# replacing the containers costs a few seconds and removes the entire class of
+# "I deployed but nothing changed".
+\$DC up -d --force-recreate --remove-orphans \$services
 
 echo
 \$DC ps --format 'table {{.Service}}\t{{.Status}}\t{{.Ports}}'
+
+# Prove the running containers are on the image we just built, rather than
+# trusting that they are.
+echo
+for svc in api worker web; do
+  case " \${services:-api worker web} " in *" \$svc "*) ;; *) continue ;; esac
+  running=\$(sudo docker inspect "myth-buster-\${svc}-1" --format '{{.Image}}' 2>/dev/null || echo none)
+  tagged=\$(sudo docker image inspect "myth-buster-\$svc" --format '{{.Id}}' 2>/dev/null || echo none)
+  if [ "\$running" = "\$tagged" ]; then
+    echo "  \$svc is running the current image"
+  else
+    echo "  FATAL: \$svc is running a stale image (\${running:0:19} != \${tagged:0:19})" >&2
+    exit 1
+  fi
+done
 REMOTE
 
 say "Waiting for health"
