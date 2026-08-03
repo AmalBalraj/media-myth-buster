@@ -21,6 +21,13 @@ Rules:
 2. SELF-CONTAINED — resolve pronouns and deixis. "They raised it by 40%" becomes
    "The Reserve Bank of India raised interest rates by 40% in 2024."
 3. FAITHFUL — never strengthen, soften, or add specificity the speaker did not give.
+3a. LANGUAGE — `text` is ALWAYS English, translated if the source is not, because
+   it drives evidence search. `verbatim` is ALWAYS the original wording in the
+   original script, unchanged. `lang` is the ISO 639-1 code of the source
+   ("hi", "ml", "ta", "en", …). Translate meaning, not words: keep names,
+   numbers, and places exactly as given, and do not resolve an ambiguity the
+   original left open. A viewer who speaks the language must be able to check
+   your translation against the verbatim text, so never paraphrase into it.
 4. Keep opinions and predictions, but type them correctly; they are scored differently
    and must never be marked false.
 5. Skip greetings, calls to action, sponsorships, and filler.
@@ -45,9 +52,15 @@ topic: one of health, science, statistics, economics, history, politics, general
 Drives which evidence sources get queried, so choose carefully.
 
 Return JSON:
-{"claims": [{"text": str, "verbatim": str, "claim_type": str, "topic": str,
-             "checkworthiness": float, "t_start": float|null, "t_end": float|null,
-             "source": "asr"|"ocr"|"caption", "entities": [str]}]}
+{"claims": [{"text": str, "verbatim": str, "lang": str, "claim_type": str,
+             "topic": str, "checkworthiness": float,
+             "t_start": float|null, "t_end": float|null,
+             "source": "asr"|"ocr"|"caption", "entities": [str],
+             "native_query": str|null}]}
+
+native_query: for non-English sources, a search query in the ORIGINAL language
+for finding local coverage — regional events are often reported only in the
+regional press, and sometimes nowhere in English. Null when lang is "en".
 
 Order claims by their appearance in the video. Return at most 12."""
 

@@ -96,29 +96,50 @@ def _host_allowed(url: str) -> bool:
         return True  # not a bare IP; hostname is on the allowlist
 
 
-async def download_media(bundle: MediaBundle) -> tuple[Path, str]:
-    """Stream the CDN file to disk. Returns (path, sha256). Caps enforced mid-stream."""
-    if not bundle.media_url:
-        raise IngestError("MediaBundle has no media_url")
-    if bundle.ingest_path != "ytdlp" and not _host_allowed(bundle.media_url):
-        raise IngestError(f"Refusing to fetch off-allowlist host: {bundle.media_url[:80]}")
-
+async def _stream_to(client: httpx.AsyncClient, url: str, dest: Path) -> str:
     limit = settings.max_media_mb * 1024 * 1024
-    dest = settings.media_dir / f"{bundle.platform}_{bundle.shortcode}.mp4"
     digest = hashlib.sha256()
     written = 0
+    async with client.stream("GET", url, timeout=30) as resp:
+        resp.raise_for_status()
+        with dest.open("wb") as fh:
+            async for chunk in resp.aiter_bytes(65536):
+                written += len(chunk)
+                if written > limit:
+                    fh.close()
+                    dest.unlink(missing_ok=True)
+                    raise IngestError(f"Media exceeds {settings.max_media_mb}MB cap")
+                digest.update(chunk)
+                fh.write(chunk)
+    return digest.hexdigest()
+
+
+async def download_media(bundle: MediaBundle) -> tuple[list[Path], str]:
+    """Stream the CDN file(s) to disk.
+
+    Returns (paths, sha256). A video yields one path; a carousel yields one per
+    slide, in order. The digest covers all of them so the same post always
+    content-addresses identically.
+    """
+    if not bundle.has_media:
+        raise IngestError("MediaBundle has neither a video nor images")
+
+    urls = [bundle.media_url] if bundle.has_video else list(bundle.image_urls)
+    for url in urls:
+        if bundle.ingest_path != "ytdlp" and not _host_allowed(url):
+            raise IngestError(f"Refusing to fetch off-allowlist host: {url[:80]}")
+
+    combined = hashlib.sha256()
+    paths: list[Path] = []
 
     async with httpx.AsyncClient(follow_redirects=True, max_redirects=3) as client:
-        async with client.stream("GET", bundle.media_url, timeout=30) as resp:
-            resp.raise_for_status()
-            with dest.open("wb") as fh:
-                async for chunk in resp.aiter_bytes(65536):
-                    written += len(chunk)
-                    if written > limit:
-                        fh.close()
-                        dest.unlink(missing_ok=True)
-                        raise IngestError(f"Media exceeds {settings.max_media_mb}MB cap")
-                    digest.update(chunk)
-                    fh.write(chunk)
+        for i, url in enumerate(urls):
+            if bundle.has_video:
+                dest = settings.media_dir / f"{bundle.platform}_{bundle.shortcode}.mp4"
+            else:
+                dest = settings.media_dir / f"{bundle.platform}_{bundle.shortcode}_{i:02d}.jpg"
+            combined.update((await _stream_to(client, url, dest)).encode())
+            paths.append(dest)
 
-    return dest, digest.hexdigest()
+    log.info("media_downloaded", shortcode=bundle.shortcode, kind=bundle.kind, files=len(paths))
+    return paths, combined.hexdigest()

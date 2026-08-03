@@ -87,11 +87,16 @@ async def google_factcheck(client: httpx.AsyncClient, query: str) -> list[Doc]:
 
 
 # ── Tier 2: structured / authoritative ───────────────────────────────────────
-async def wikipedia(client: httpx.AsyncClient, query: str) -> list[Doc]:
+async def wikipedia(
+    client: httpx.AsyncClient, query: str, lang: str = "en"
+) -> list[Doc]:
+    """The language edition matters: regional topics are often far better covered
+    in the local-language Wikipedia than in English, and sometimes only there."""
+    host = f"{lang}.wikipedia.org"
     try:
         data = await _get_json(
             client,
-            "https://en.wikipedia.org/w/api.php",
+            f"https://{host}/w/api.php",
             {"action": "query", "list": "search", "srsearch": query[:300],
              "format": "json", "srlimit": 4},
         )
@@ -99,12 +104,12 @@ async def wikipedia(client: httpx.AsyncClient, query: str) -> list[Doc]:
         return []
     return [
         Doc(
-            url=f"https://en.wikipedia.org/wiki/{r['title'].replace(' ', '_')}",
+            url=f"https://{host}/wiki/{r['title'].replace(' ', '_')}",
             title=r["title"],
             snippet=r.get("snippet", "")
             .replace('<span class="searchmatch">', "")
             .replace("</span>", ""),
-            publisher="Wikipedia",
+            publisher="Wikipedia" if lang == "en" else f"Wikipedia ({lang})",
             tier="structured",
         )
         for r in data.get("query", {}).get("search", [])
@@ -240,13 +245,15 @@ async def worldbank(client: httpx.AsyncClient, query: str) -> list[Doc]:
 
 
 # ── Tier 3: open web ─────────────────────────────────────────────────────────
-async def searxng(client: httpx.AsyncClient, query: str, limit: int = 6) -> list[Doc]:
+async def searxng(
+    client: httpx.AsyncClient, query: str, limit: int = 6, lang: str = "en"
+) -> list[Doc]:
     """Self-hosted metasearch: unlimited and $0, which is what makes broad retrieval viable."""
     try:
         data = await _get_json(
             client,
             f"{settings.searxng_url.rstrip('/')}/search",
-            {"q": query[:300], "format": "json", "language": "en",
+            {"q": query[:300], "format": "json", "language": lang,
              "categories": "general,news"},
             timeout=20,
         )
@@ -293,11 +300,30 @@ ROUTES: dict[str, list] = {
 }
 
 
-async def gather(query: str, topic: str = "general") -> list[Doc]:
-    """Fan out across tier 1-3 for one claim, tolerating individual source failures."""
+async def gather(
+    query: str,
+    topic: str = "general",
+    *,
+    native_query: str | None = None,
+    lang: str = "en",
+) -> list[Doc]:
+    """Fan out across tier 1-3 for one claim, tolerating individual source failures.
+
+    For a non-English source, the English query runs as usual *and* the original
+    wording is searched in its own language — a district-level story in Kerala or
+    Bihar is often covered only in the regional press, so an English-only search
+    returns nothing and the claim reports as unverifiable when it is simply
+    unsearched.
+    """
     async with evidence_client() as client:
         tasks = [google_factcheck(client, query), searxng(client, query)]
         tasks += [fn(client, query) for fn in ROUTES.get(topic, ROUTES["general"])]
+
+        if lang and lang != "en" and native_query:
+            tasks += [
+                searxng(client, native_query, lang=lang),
+                wikipedia(client, native_query, lang=lang),
+            ]
 
         results = await asyncio.gather(*tasks, return_exceptions=True)
         docs: list[Doc] = []

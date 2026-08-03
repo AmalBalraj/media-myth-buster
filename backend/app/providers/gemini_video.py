@@ -13,6 +13,7 @@ Free tier (shared 250k TPM, full 1M context):
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 from pathlib import Path
 from typing import Any
@@ -112,6 +113,55 @@ async def _upload(client: httpx.AsyncClient, path: Path) -> str:
     raise ProviderError("Gemini file stayed in PROCESSING for 2 minutes")
 
 
+# Free-tier capacity is shared, so 503 ("high demand") and 429 are routine rather
+# than exceptional. Retrying costs nothing against the quota — a rejected request
+# is not a billed one — and falling back to the lighter model beats losing the
+# only source of on-screen text.
+RETRY_STATUSES = {429, 500, 502, 503, 504}
+RETRY_BACKOFF = (4, 12, 30)
+
+
+async def _generate(
+    client: httpx.AsyncClient, model: str, parts: list[dict[str, Any]]
+) -> dict[str, Any]:
+    body = {
+        "contents": [{"parts": parts}],
+        "generationConfig": {
+            "temperature": 0.1,
+            "responseMimeType": "application/json",
+            "maxOutputTokens": 8192,
+        },
+    }
+    models = [model]
+    if model != settings.gemini_light_model:
+        models.append(settings.gemini_light_model)
+
+    last = ""
+    for candidate in models:
+        for attempt, wait in enumerate((*RETRY_BACKOFF, None)):
+            r = await client.post(
+                f"{BASE}/v1beta/models/{candidate}:generateContent",
+                params={"key": settings.gemini_api_key},
+                json=body,
+                timeout=300,
+            )
+            if r.status_code < 400:
+                return r.json()
+
+            last = f"{r.status_code}: {r.text[:200]}"
+            if r.status_code not in RETRY_STATUSES or wait is None:
+                break
+            log.warning(
+                "gemini_retrying", model=candidate, status=r.status_code,
+                attempt=attempt, sleeping=wait,
+            )
+            await asyncio.sleep(wait)
+
+        log.warning("gemini_model_exhausted", model=candidate, error=last)
+
+    raise ProviderError(f"Gemini generate {last}")
+
+
 async def _delete(client: httpx.AsyncClient, uri: str) -> None:
     name = uri.split("/v1beta/")[-1] if "/v1beta/" in uri else uri.rsplit("files/", 1)[-1]
     name = name if name.startswith("files/") else f"files/{name}"
@@ -131,29 +181,14 @@ async def analyse_video(path: Path, model: str | None = None) -> dict[str, Any]:
     async with httpx.AsyncClient() as client:
         uri = await _upload(client, path)
         try:
-            r = await client.post(
-                f"{BASE}/v1beta/models/{model}:generateContent",
-                params={"key": settings.gemini_api_key},
-                json={
-                    "contents": [
-                        {
-                            "parts": [
-                                {"file_data": {"mime_type": "video/mp4", "file_uri": uri}},
-                                {"text": VIDEO_PROMPT},
-                            ]
-                        }
-                    ],
-                    "generationConfig": {
-                        "temperature": 0.1,
-                        "responseMimeType": "application/json",
-                        "maxOutputTokens": 8192,
-                    },
-                },
-                timeout=300,
+            payload = await _generate(
+                client,
+                model,
+                [
+                    {"file_data": {"mime_type": "video/mp4", "file_uri": uri}},
+                    {"text": VIDEO_PROMPT},
+                ],
             )
-            if r.status_code >= 400:
-                raise ProviderError(f"Gemini generate {r.status_code}: {r.text[:300]}")
-            payload = r.json()
         finally:
             await _delete(client, uri)
 
@@ -193,6 +228,73 @@ def _coerce_analysis(result: Any, model: str) -> dict[str, Any]:
         f"Gemini returned an unusable shape ({type(result).__name__}); "
         "expected an object with on_screen_text"
     )
+
+
+IMAGE_PROMPT = """You are a forensic media analyst examining a social-media photo post.
+
+The images are the slides of one post, in order. Report only what is VISIBLE — another
+system verifies factual accuracy. Transcribing the text is by far the most important
+part: these posts carry their claims as text on the image, and nothing else in the
+pipeline can read them.
+
+Return JSON with exactly these keys:
+{
+  "on_screen_text": [{"t_start": float, "t_end": float, "text": str, "kind": "caption|chyron|screenshot|watermark|other"}],
+  "visual_summary": str,
+  "scenes": [{"t_start": float, "t_end": float, "description": str, "footage_kind": "original|stock|screen_recording|archival|graphic|unclear"}],
+  "audio_visual_consistency": {"score": float, "notes": str},
+  "staging_cues": [str],
+  "visible_attribution": [str],
+  "people_on_screen": int,
+  "quality_flags": [str]
+}
+
+Because there is no timeline, use the slide index for t_start and t_end: slide 1 is
+t_start 0 t_end 1, slide 2 is 1 to 2, and so on. One on_screen_text entry per slide,
+containing that slide's full text verbatim, in its original script — do not translate.
+Set audio_visual_consistency.score to 1.0 and note "photo post, no audio".
+visible_attribution: cited sources, watermarks, handles, or logos shown on the slides.
+"""
+
+
+async def analyse_images(paths: list[Path], model: str | None = None) -> dict[str, Any]:
+    """Read a photo post or carousel.
+
+    Slides go inline as base64 parts in one request rather than through the File
+    API: they are small, it is a single round trip, and there is nothing to clean
+    up afterwards.
+    """
+    if not settings.gemini_api_key:
+        raise ProviderError("GEMINI_API_KEY is not set")
+    if not paths:
+        raise ProviderError("No images to analyse")
+    model = model or settings.gemini_video_model
+
+    parts: list[dict[str, Any]] = []
+    for path in paths[:12]:
+        mime = "image/png" if path.suffix.lower() == ".png" else "image/jpeg"
+        parts.append(
+            {
+                "inline_data": {
+                    "mime_type": mime,
+                    "data": base64.b64encode(path.read_bytes()).decode(),
+                }
+            }
+        )
+    parts.append({"text": IMAGE_PROMPT})
+
+    async with httpx.AsyncClient() as client:
+        payload = await _generate(client, model, parts)
+    try:
+        text = payload["candidates"][0]["content"]["parts"][0]["text"]
+    except (KeyError, IndexError) as exc:
+        raise ProviderError(
+            f"Unexpected Gemini response shape: {json.dumps(payload)[:300]}"
+        ) from exc
+
+    result = _coerce_analysis(_extract_json(text), model)
+    result["_slides"] = len(parts) - 1
+    return result
 
 
 def ocr_timeline(analysis: dict[str, Any]) -> str:

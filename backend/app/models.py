@@ -139,7 +139,12 @@ class Claim(Base):
     t_start: Mapped[float | None] = mapped_column(Float)
     t_end: Mapped[float | None] = mapped_column(Float)
     source: Mapped[str] = mapped_column(String(16), default="asr")  # asr|ocr|caption
+    # `text` is always English so it can drive retrieval; `verbatim` keeps the
+    # original wording and script, and `lang` says which. Both are shown when
+    # they differ, so a speaker of the language can audit the translation the
+    # verdict rests on.
     verbatim: Mapped[str | None] = mapped_column(Text)
+    lang: Mapped[str] = mapped_column(String(8), default="en")
 
     verdict: Mapped[str | None] = mapped_column(String(24), index=True)
     confidence: Mapped[float | None] = mapped_column(Float)

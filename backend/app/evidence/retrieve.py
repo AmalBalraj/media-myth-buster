@@ -98,9 +98,14 @@ async def _hydrate(session: AsyncSession, docs: list[Doc]) -> dict[str, str]:
 
 
 async def evidence_for_claim(
-    session: AsyncSession, claim_text: str, topic: str = "general"
+    session: AsyncSession,
+    claim_text: str,
+    topic: str = "general",
+    *,
+    native_query: str | None = None,
+    lang: str = "en",
 ) -> list[Passage]:
-    docs = await gather(claim_text, topic)
+    docs = await gather(claim_text, topic, native_query=native_query, lang=lang)
     if not docs:
         return []
 

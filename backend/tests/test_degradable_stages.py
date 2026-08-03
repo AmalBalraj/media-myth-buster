@@ -30,9 +30,45 @@ async def test_video_stage_degrades_on_any_provider_error(monkeypatch, boom, tmp
         raise boom
 
     monkeypatch.setattr(runner.gemini_video, "analyse_video", explode)
-    result = await runner._stage_video("r1", tmp_path / "x.mp4")
+    result = await runner._stage_video("r1", [tmp_path / "x.mp4"], True)
     assert result["on_screen_text"] == []
     assert "error" in result
+
+
+async def test_image_stage_degrades_too(monkeypatch, tmp_path):
+    async def explode(paths, model=None):
+        raise TypeError("boom")
+
+    monkeypatch.setattr(runner.gemini_video, "analyse_images", explode)
+    result = await runner._stage_video("r1", [tmp_path / "a.jpg"], False)
+    assert result["on_screen_text"] == []
+
+
+async def test_photo_posts_route_to_the_image_analyser(monkeypatch, tmp_path):
+    """A photo post must never be handed to the video path — and vice versa."""
+    called = {}
+
+    async def images(paths, model=None):
+        called["images"] = len(paths)
+        return {"on_screen_text": [{"text": "slide"}]}
+
+    async def video(path, model=None):
+        called["video"] = True
+        return {"on_screen_text": []}
+
+    monkeypatch.setattr(runner.gemini_video, "analyse_images", images)
+    monkeypatch.setattr(runner.gemini_video, "analyse_video", video)
+
+    await runner._stage_video("r1", [tmp_path / "a.jpg", tmp_path / "b.jpg"], False)
+    assert called == {"images": 2}
+
+
+async def test_transcription_is_skipped_for_photo_posts():
+    """A photo post has no audio; that is expected, not a degraded stage."""
+    result = await runner._skip_transcribe("r1")
+    assert result["text"] == ""
+    assert result["skipped"]
+    assert "error" not in result
 
 
 @pytest.mark.parametrize("boom", [TypeError("boom"), ProviderError("quota")])

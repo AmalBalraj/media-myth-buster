@@ -82,12 +82,14 @@ async def _upsert_creator(session: AsyncSession, bundle: MediaBundle) -> Creator
 
 async def _stage_ingest(
     session: AsyncSession, report: Report, url: str
-) -> tuple[Media, Path, Creator | None]:
+) -> tuple[Media, list[Path], Creator | None]:
     bundle = await resolve(url)
-    if not bundle.has_video:
-        raise PipelineError("Resolved the post but it exposes no downloadable video")
+    if not bundle.has_media:
+        raise PipelineError(
+            "Resolved the post but it has no video or images to analyse"
+        )
 
-    path, digest = await download_media(bundle)
+    paths, digest = await download_media(bundle)
     creator = await _upsert_creator(session, bundle)
 
     media = (
@@ -110,14 +112,14 @@ async def _stage_ingest(
     media.like_count = bundle.like_count
     media.comment_count = bundle.comment_count
     media.view_count = bundle.view_count
-    media.storage_key = str(path)
+    media.storage_key = str(paths[0])
     media.creator_id = creator.id if creator else None
 
     await session.flush()
     report.media_id = media.id
     # The Creator is returned rather than reached through media.creator: that
     # attribute is never eager-loaded here, and touching it would issue lazy SQL.
-    return media, path, creator
+    return media, paths, creator
 
 
 async def _stage_transcribe(report_id: str, path: Path) -> dict[str, Any]:
@@ -138,10 +140,23 @@ async def _stage_transcribe(report_id: str, path: Path) -> dict[str, Any]:
     return result
 
 
-async def _stage_video(report_id: str, path: Path) -> dict[str, Any]:
+async def _skip_transcribe(report_id: str) -> dict[str, Any]:
+    """A photo post has no audio track; that is expected, not a failure."""
+    await _emit(report_id, "transcribe", "done", skipped="photo post has no audio")
+    return {"text": "", "segments": [], "skipped": "no audio track"}
+
+
+async def _stage_video(report_id: str, paths: list[Path], is_video: bool) -> dict[str, Any]:
+    """Read the visual content — a video through the File API, a photo carousel as
+    inline images. For a photo post this is the *only* source of claims, since
+    there is no audio at all."""
     await _emit(report_id, "video", "start")
     try:
-        result = await gemini_video.analyse_video(path)
+        result = (
+            await gemini_video.analyse_video(paths[0])
+            if is_video
+            else await gemini_video.analyse_images(paths)
+        )
     except Exception as exc:  # noqa: BLE001 - degradable stage, see _stage_transcribe
         log.warning("video_analysis_failed", error=str(exc), exc_info=True)
         await _emit(report_id, "video", "error", message=str(exc))
@@ -196,7 +211,11 @@ async def _adjudicate_one(
         )
 
     passages = await evidence_for_claim(
-        session, claim["text"], claim.get("topic", "general")
+        session,
+        claim["text"],
+        claim.get("topic", "general"),
+        native_query=claim.get("native_query"),
+        lang=(claim.get("lang") or "en"),
     )
     if not passages:
         return (
@@ -329,6 +348,7 @@ async def _persist(
             t_end=claim.get("t_end"),
             source=claim.get("source", "asr"),
             verbatim=claim.get("verbatim"),
+            lang=(claim.get("lang") or "en")[:8],
             verdict=verdict.get("verdict"),
             confidence=verdict.get("confidence"),
             rationale=verdict.get("rationale"),
@@ -372,26 +392,34 @@ async def run_pipeline(session: AsyncSession, report: Report, url: str) -> None:
     started = time.perf_counter()
     ds = DeepSeek()
     # Bound before the try so the finally block is safe when ingest itself fails.
-    media_path: str | None = None
+    media_paths: list[Path] = []
     report.status = "running"
     await session.flush()
 
     try:
         await _emit(report.id, "ingest", "start")
-        media, path, creator = await _stage_ingest(session, report, url)
-        media_path = str(path)
+        media, media_paths, creator = await _stage_ingest(session, report, url)
+        is_video = media.media_type != "CAROUSEL_ALBUM"
         await session.commit()
         await _emit(
             report.id, "ingest", "done",
             shortcode=media.shortcode, path=media.ingest_path,
+            kind="video" if is_video else f"{len(media_paths)} images",
             creator=creator.handle if creator else None,
         )
 
-        # Transcript, video understanding, and forensics are independent — the
-        # wall-clock cost of the whole analysis is roughly the slowest of the three.
+        # Transcript, visual analysis and forensics are independent — the wall
+        # clock cost of the whole analysis is roughly the slowest of the three.
+        # A photo post has no audio, so transcription is skipped rather than
+        # sent an image and failed.
+        transcribe = (
+            _stage_transcribe(report.id, media_paths[0])
+            if is_video
+            else _skip_transcribe(report.id)
+        )
         transcript, video, signals = await asyncio.gather(
-            _stage_transcribe(report.id, path),
-            _stage_video(report.id, path),
+            transcribe,
+            _stage_video(report.id, media_paths, is_video),
             _stage_forensics(report.id, media.storage_key or "", media.shortcode),
         )
         report.transcript = transcript
@@ -507,9 +535,10 @@ async def run_pipeline(session: AsyncSession, report: Report, url: str) -> None:
         log.exception("pipeline_crashed", report_id=report.id)
 
     finally:
-        # media_path, not report.media.storage_key: the relationship is not
+        # media_paths, not report.media.storage_key: the relationship is not
         # loaded here and reaching for it would issue SQL after the session may
         # already be rolled back.
-        if settings.media_retention_days == 0 and media_path:
-            Path(media_path).unlink(missing_ok=True)
+        if settings.media_retention_days == 0:
+            for p in media_paths:
+                p.unlink(missing_ok=True)
         log.info("pipeline_usage", report_id=report.id, calls=json.dumps(ds.usage)[:2000])

@@ -47,6 +47,8 @@ class ClaimOut(BaseModel):
     t_start: float | None
     t_end: float | None
     source: str
+    verbatim: str | None
+    lang: str
     verdict: str | None
     confidence: float | None
     rationale: str | None
@@ -75,6 +77,9 @@ class MediaOut(BaseModel):
     caption: str | None
     posted_at: datetime | None
     ingest_path: str
+    # VIDEO or CAROUSEL_ALBUM — the report says which, since a photo post has no
+    # transcript and its claims come entirely from slide text.
+    media_type: str | None
     like_count: int | None
     comment_count: int | None
     view_count: int | None

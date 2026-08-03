@@ -70,6 +70,21 @@ if [ "$BUILD" = "1" ]; then
   echo "building \${services:-all services}…"
   \$DC build \$services
 fi
+
+# Migrate before anything serves. A model change that never reached the database
+# used to surface as a runtime insert failure on the first analysis; now it is a
+# failed deploy instead.
+echo "migrating database…"
+\$DC up -d postgres
+\$DC run --rm --no-deps api alembic upgrade head
+
+# Refuse to ship models that have drifted from the migrations.
+if ! \$DC run --rm --no-deps api alembic check; then
+  echo "FATAL: models have changes with no migration. Run:" >&2
+  echo "  cd backend && alembic revision --autogenerate -m 'describe change'" >&2
+  exit 1
+fi
+
 \$DC up -d --remove-orphans \$services
 
 echo

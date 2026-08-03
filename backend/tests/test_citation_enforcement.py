@@ -36,7 +36,7 @@ def passages(n=3):
 @pytest.fixture
 def patched(monkeypatch):
     def _apply(response, passes):
-        async def fake_evidence(session, text, topic="general"):
+        async def fake_evidence(session, text, topic="general", **kwargs):
             return passes
 
         monkeypatch.setattr("app.pipeline.runner.evidence_for_claim", fake_evidence)

@@ -27,6 +27,10 @@ export interface Claim {
   t_start: number | null;
   t_end: number | null;
   source: string;
+  /** Original wording, in the original script. Shown when it differs from `text`. */
+  verbatim: string | null;
+  /** ISO 639-1 code of the source; `text` is always English. */
+  lang: string;
   verdict: Verdict | null;
   confidence: number | null;
   rationale: string | null;
